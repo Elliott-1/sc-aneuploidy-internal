@@ -1,0 +1,135 @@
+```{r}
+# Cao integration?
+
+library(data.table)
+library(ggplot2)
+library(monocle3)
+library(dplyr)
+library(Seurat)
+```
+
+
+```{r}
+dis_cao_cds <- readRDS("~/aneuploidy/data/dis_cao_brum_bellum_10k.RDS")
+```
+
+```{r}
+full_var <- read.csv("~/aneuploidy/data/dis_var_fil.csv")
+
+full_var$gene_short_name <- make.unique(full_var$gene_short_name)
+rownames(full_var) <- full_var$gene_short_name
+```
+
+
+```{r}
+dis_cao_obs <- as.data.frame(pData(dis_cao_cds))
+dis_cao_mtx <- dis_cao_cds@assays@data@listData[["counts"]]
+```
+
+
+### Seurat clustering
+
+```{r}
+seurat_cao_dis <- CreateSeuratObject(counts = dis_cao_mtx, meta.data = dis_cao_obs)
+```
+
+```{r}
+seurat_cao_dis
+```
+```{r}
+seurat_cao_dis@meta.data
+```
+
+```{r}
+# Assuming your dataframe is named df
+na_counts <- colSums(is.na(seurat_cao_dis@meta.data))
+na_counts
+```
+
+```{r}
+seurat_cao_dis[["RNA"]]@meta.features
+```
+
+
+
+
+```{r}
+seurat_cao_dis[["RNA"]] <- split(seurat_cao_dis[["RNA"]], f = seurat_cao_dis$origin)
+
+seurat_cao_dis <- NormalizeData(seurat_cao_dis)
+seurat_cao_dis <- FindVariableFeatures(seurat_cao_dis)
+seurat_cao_dis <- ScaleData(seurat_cao_dis)
+seurat_cao_dis <- RunPCA(seurat_cao_dis)
+
+seurat_cao_dis <- FindNeighbors(seurat_cao_dis, dims = 1:50, reduction = "pca")
+seurat_cao_dis <- FindClusters(seurat_cao_dis, resolution = 2, cluster.name = "unintegrated_clusters")
+seurat_cao_dis <- RunUMAP(seurat_cao_dis, dims = 1:50, reduction = "pca", reduction.name = "umap.unintegrated")
+```
+
+
+```{r}
+seurat_cao_dis <- IntegrateLayers(
+  object = seurat_cao_dis, method = CCAIntegration,
+  orig.reduction = "pca", new.reduction = "integrated.cca",
+  verbose = FALSE
+)
+
+seurat_cao_dis <- FindNeighbors(seurat_cao_dis, reduction = "integrated.cca", dims = 1:50)
+seurat_cao_dis <- FindClusters(seurat_cao_dis, resolution = 2, cluster.name = "cca_clusters")
+```
+
+### CELL LABEL TRANSFER
+
+```{r}
+integration_ref <- subset(seurat_cao_dis, origin %in% c("Cao"))
+integration_query <- subset(seurat_cao_dis, origin %in% c("Disteche"))
+
+int_test <- FindTransferAnchors(reference = integration_ref, query = integration_query, dims = 1:50,
+    reference.reduction = "integrated.cca")
+predictions_int <- TransferData(anchorset = int_test, refdata = integration_ref$Main_cluster_name, dims = 1:50)
+integration_query_int <- AddMetaData(integration_query, metadata = predictions_int)
+```
+
+```{r}
+use_df <- as.data.frame(seurat_cao_dis@meta.data)
+# Select the columns "cell_unique" and "predicted.id" to create a new dataframe
+new_df <- integration_query_int@meta.data %>% 
+  select(cell_unique, predicted.id)
+
+# Left join obs_df_main with the new dataframe on the column "cell_unique"
+use_df <- left_join(use_df, new_df, by = "cell_unique")
+```
+
+```{r}
+seurat_cao_dis@meta.data$predicted_id <- use_df$predicted.id
+```
+
+```{r}
+as.data.frame(dis_cao_cds@rowRanges@elementMetadata)
+```
+
+
+```{r}
+final_obs <- as.data.frame(seurat_cao_dis@meta.data)
+final_var <- as.data.frame(dis_cao_cds@rowRanges@elementMetadata)
+rownames(final_var) <- final_var$ensembl
+exp_norm <- cbind2(seurat_cao_dis@assays[["RNA"]]@layers[["data.Disteche"]], seurat_cao_dis@assays[["RNA"]]@layers[["data.Cao"]])
+```
+
+```{r}
+identical(final_var$ensembl, full_var$ensembl)
+```
+
+
+```{r}
+# creates CDS object
+dis_cao_cds_final <- new_cell_data_set(exp_norm,
+                         cell_metadata = final_obs,
+                         gene_metadata = full_var)
+```
+
+```{r}
+saveRDS(dis_cao_cds_final, "~/aneuploidy/data/final_cds_10k.RDS")
+```
+
+
